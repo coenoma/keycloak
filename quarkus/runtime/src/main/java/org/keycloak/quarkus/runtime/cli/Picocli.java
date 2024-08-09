@@ -66,7 +66,6 @@ import org.keycloak.config.OptionCategory;
 import org.keycloak.quarkus.runtime.cli.command.AbstractCommand;
 import org.keycloak.quarkus.runtime.cli.command.BootstrapAdmin;
 import org.keycloak.quarkus.runtime.cli.command.Build;
-import org.keycloak.quarkus.runtime.cli.command.ImportRealmMixin;
 import org.keycloak.quarkus.runtime.cli.command.Main;
 import org.keycloak.quarkus.runtime.cli.command.ShowConfig;
 import org.keycloak.quarkus.runtime.cli.command.Start;
@@ -100,7 +99,6 @@ public final class Picocli {
     public static final String ARG_PREFIX = "--";
     public static final String ARG_SHORT_PREFIX = "-";
     public static final String NO_PARAM_LABEL = "none";
-    private static final String ARG_KEY_VALUE_SEPARATOR = "=";
 
     private static class IncludeOptions {
         boolean includeRuntime;
@@ -277,11 +275,9 @@ public final class Picocli {
             public void accept(String key, String value) {
                 PropertyMapper<?> mapper = PropertyMappers.getMapper(key);
 
-                if (mapper != null && mapper.isBuildTime()) {
-                    return;
+                if (mapper == null || mapper.isRunTime()) {
+                    properties.add(key + "=" + maskValue(key, value));
                 }
-
-                properties.add(key + "=" + maskValue(key, value));
             }
         }, arg -> {
             properties.add(arg);
@@ -301,11 +297,9 @@ public final class Picocli {
         parseConfigArgs(cliArgs, (k, v) -> {
             PropertyMapper<?> mapper = PropertyMappers.getMapper(k);
 
-            if (mapper == null || mapper.isRunTime()) {
-                return;
+            if (mapper != null && mapper.isBuildTime()) {
+                configArgsList.add(k + "=" + v);
             }
-
-            configArgsList.add(k + "=" + v);
         }, ignored -> {});
 
         int exitCode = cmd.execute(configArgsList.toArray(new String[0]));
@@ -380,6 +374,8 @@ public final class Picocli {
             if (options.includeRuntime) {
                 disabledMappers.addAll(PropertyMappers.getDisabledRuntimeMappers().values());
             }
+            
+            checkSpiOptions(options, ignoredBuildTime, ignoredRunTime);
 
             for (OptionCategory category : abstractCommand.getOptionCategories()) {
                 List<PropertyMapper<?>> mappers = new ArrayList<>(disabledMappers);
@@ -433,10 +429,10 @@ public final class Picocli {
             Logger logger = Logger.getLogger(Picocli.class); // logger can't be instantiated in a class field
 
             if (!ignoredBuildTime.isEmpty()) {
-                logger.warn(format("The following build time non-cli options have values that differ from what is persisted - the new values will NOT be used until another build is run: %s\n",
+                logger.warn(format("The following build time options have values that differ from what is persisted - the new values will NOT be used until another build is run: %s\n",
                         String.join(", ", ignoredBuildTime)));
             } else if (!ignoredRunTime.isEmpty()) {
-                logger.warn(format("The following run time non-cli options were found, but will be ignored during build time: %s\n",
+                logger.warn(format("The following run time options were found, but will be ignored during build time: %s\n",
                         String.join(", ", ignoredRunTime)));
             }
 
@@ -452,6 +448,36 @@ public final class Picocli {
         } finally {
             DisabledMappersInterceptor.enable(disabledMappersInterceptorEnabled);
             PropertyMappingInterceptor.enable();
+        }
+    }
+
+    private static void checkSpiOptions(IncludeOptions options, final List<String> ignoredBuildTime,
+            final List<String> ignoredRunTime) {
+        String kcSpiPrefix = NS_KEYCLOAK_PREFIX + "spi";
+        for (String key : Configuration.getConfig().getPropertyNames()) {
+            if (!key.startsWith(kcSpiPrefix)) {
+                continue;
+            }
+            boolean buildTimeOption = key.endsWith("-provider") || key.endsWith("-provider-default") || key.endsWith("-enabled");
+            
+            ConfigValue configValue = Configuration.getConfigValue(key);
+            String configValueStr = configValue.getValue();
+
+            // don't consider missing or anything below standard env properties
+            if (configValueStr == null || configValue.getConfigSourceOrdinal() < 300) {
+                continue;
+            }
+            
+            if (!options.includeBuildTime) {
+                if (buildTimeOption) {
+                    String currentValue = getRawPersistedProperty(key).orElse(null);
+                    if (!configValueStr.equals(currentValue)) {
+                        ignoredBuildTime.add(key);
+                    }
+                }
+            } else if (!buildTimeOption) {
+                ignoredRunTime.add(key);
+            }
         }
     }
 
@@ -855,40 +881,24 @@ public final class Picocli {
 
         // makes sure cli args are available to the config source
         ConfigArgsConfigSource.setCliArgs(rawArgs);
-        List<String> args = new ArrayList<>(List.of(rawArgs));
-        Iterator<String> iterator = args.iterator();
 
-        while (iterator.hasNext()) {
-            String arg = iterator.next();
-
-            if (arg.startsWith("--spi") || arg.startsWith("-D")) {
-                // TODO: ignore properties for providers for now, need to fetch them from the providers, otherwise CLI will complain about invalid options
-                // also ignores system properties as they are set when starting the JVM
-                // change this once we are able to obtain properties from providers
-                iterator.remove();
-
-                if (!arg.contains(ARG_KEY_VALUE_SEPARATOR)) {
-                    if (!iterator.hasNext()) {
-                        if (arg.startsWith("--spi")) {
-                            throw new PropertyException(format("spi argument %s requires a value.", arg));
-                        }
-                        return args;
-                    }
-                    String next = iterator.next();
-
-                    if (!next.startsWith("--")) {
-                        // ignore the value if the arg is using space as separator
-                        iterator.remove();
-                    }
-                }
+        // TODO: ignore properties for providers for now, need to fetch them from the providers, otherwise CLI will complain about invalid options
+        // also ignores system properties as they are set when starting the JVM
+        // change this once we are able to obtain properties from providers
+        List<String> args = new ArrayList<>();
+        ConfigArgsConfigSource.parseConfigArgs(List.of(rawArgs), (arg, value) -> {
+            if (!arg.startsWith(ConfigArgsConfigSource.SPI_OPTION_PREFIX) && !arg.startsWith("-D")) {
+                args.add(arg + "=" + value);
             }
-        }
-
+        }, arg -> {
+            if (arg.startsWith(ConfigArgsConfigSource.SPI_OPTION_PREFIX)) {
+                throw new PropertyException(format("spi argument %s requires a value.", arg));
+            }
+            if (!arg.startsWith("-D")) {
+                args.add(arg);
+            }
+        });
         return args;
-    }
-
-    private static boolean isRuntimeOption(String arg) {
-        return arg.startsWith(ImportRealmMixin.IMPORT_REALM);
     }
 
     private static void checkChangesInBuildOptionsDuringAutoBuild() {

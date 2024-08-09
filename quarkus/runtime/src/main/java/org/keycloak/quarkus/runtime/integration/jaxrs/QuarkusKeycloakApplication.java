@@ -17,27 +17,22 @@
 
 package org.keycloak.quarkus.runtime.integration.jaxrs;
 
-import io.quarkus.runtime.ShutdownEvent;
-import io.quarkus.runtime.StartupEvent;
-import io.smallrye.common.annotation.Blocking;
-
-import org.keycloak.Config;
 import org.keycloak.config.BootstrapAdminOptions;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.KeycloakSessionFactory;
-import org.keycloak.models.KeycloakSessionTask;
-import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.platform.Platform;
 import org.keycloak.quarkus.runtime.Environment;
 import org.keycloak.quarkus.runtime.cli.command.AbstractNonServerCommand;
 import org.keycloak.quarkus.runtime.configuration.Configuration;
 import org.keycloak.quarkus.runtime.integration.QuarkusKeycloakSessionFactory;
 import org.keycloak.quarkus.runtime.integration.QuarkusPlatform;
-import org.keycloak.services.ServicesLogger;
 import org.keycloak.services.managers.ApplianceBootstrap;
 import org.keycloak.services.resources.KeycloakApplication;
 import org.keycloak.utils.StringUtil;
 
+import io.quarkus.runtime.ShutdownEvent;
+import io.quarkus.runtime.StartupEvent;
+import io.smallrye.common.annotation.Blocking;
 import jakarta.enterprise.event.Observes;
 import jakarta.ws.rs.ApplicationPath;
 
@@ -46,9 +41,7 @@ import jakarta.ws.rs.ApplicationPath;
 public class QuarkusKeycloakApplication extends KeycloakApplication {
 
     private static final String KEYCLOAK_ADMIN_ENV_VAR = "KEYCLOAK_ADMIN";
-    private static final String KEYCLOAK_ADMIN_PROP_VAR = "keycloakAdmin";
     private static final String KEYCLOAK_ADMIN_PASSWORD_ENV_VAR = "KEYCLOAK_ADMIN_PASSWORD";
-    private static final String KEYCLOAK_ADMIN_PASSWORD_PROP_VAR = "keycloakAdminPassword";
 
     void onStartupEvent(@Observes StartupEvent event) {
         QuarkusPlatform platform = (QuarkusPlatform) Platform.getPlatform();
@@ -79,57 +72,31 @@ public class QuarkusKeycloakApplication extends KeycloakApplication {
 
     @Override
     protected void createTemporaryAdmin(KeycloakSession session) {
-        var adminUsername = Configuration.getOptionalKcValue(BootstrapAdminOptions.USERNAME.getKey()).orElse(getEnvOrProp(KEYCLOAK_ADMIN_ENV_VAR, KEYCLOAK_ADMIN_PROP_VAR));
-        var adminPassword = Configuration.getOptionalKcValue(BootstrapAdminOptions.PASSWORD.getKey()).orElse(getEnvOrProp(KEYCLOAK_ADMIN_PASSWORD_ENV_VAR, KEYCLOAK_ADMIN_PASSWORD_PROP_VAR));
+        var adminUsername = Configuration.getOptionalKcValue(BootstrapAdminOptions.USERNAME.getKey()).orElse(System.getenv(KEYCLOAK_ADMIN_ENV_VAR));
+        var adminPassword = Configuration.getOptionalKcValue(BootstrapAdminOptions.PASSWORD.getKey()).orElse(System.getenv(KEYCLOAK_ADMIN_PASSWORD_ENV_VAR));
 
         var clientId = Configuration.getOptionalKcValue(BootstrapAdminOptions.CLIENT_ID.getKey()).orElse(null);
         var clientSecret = Configuration.getOptionalKcValue(BootstrapAdminOptions.CLIENT_SECRET.getKey()).orElse(null);
 
         try {
             //Integer expiration = Configuration.getOptionalKcValue(BootstrapAdminOptions.EXPIRATION.getKey()).map(Integer::valueOf).orElse(null);
-            if (StringUtil.isNotBlank(adminPassword)) {
-                createTemporaryMasterRealmAdminUser(adminUsername, adminPassword, /*expiration,*/ session);
+            if (StringUtil.isNotBlank(adminPassword) && !createTemporaryMasterRealmAdminUser(adminUsername, adminPassword, /*expiration,*/ session)) {
+                throw new RuntimeException("Aborting startup and the creation of the master realm, because the temporary admin user account could not be created.");
             }
-            if (StringUtil.isNotBlank(clientSecret)) {
-                createTemporaryMasterRealmAdminService(clientId, clientSecret, /*expiration,*/ session);
+            if (StringUtil.isNotBlank(clientSecret) && !createTemporaryMasterRealmAdminService(clientId, clientSecret, /*expiration,*/ session)) {
+                throw new RuntimeException("Aborting startup and the creation of the master realm, because the temporary admin service account could not be created.");
             }
         } catch (NumberFormatException e) {
             throw new RuntimeException("Invalid admin expiration value provided. An integer is expected.", e);
         }
     }
 
-    public void createTemporaryMasterRealmAdminUser(String adminUserName, String adminPassword, /*Integer adminExpiration,*/ KeycloakSession existingSession) {
-        KeycloakSessionTask task = session -> {
-            new ApplianceBootstrap(session).createTemporaryMasterRealmAdminUser(adminUserName, adminPassword /*, adminExpiration*/, false);
-        };
-
-        runAdminTask(adminUserName, existingSession, task);
+    public boolean createTemporaryMasterRealmAdminUser(String adminUserName, String adminPassword, /*Integer adminExpiration,*/ KeycloakSession session) {
+        return new ApplianceBootstrap(session).createTemporaryMasterRealmAdminUser(adminUserName, adminPassword /*, adminExpiration*/, false);
     }
 
-    public void createTemporaryMasterRealmAdminService(String clientId, String clientSecret, /*Integer adminExpiration,*/ KeycloakSession existingSession) {
-        KeycloakSessionTask task = session -> {
-            new ApplianceBootstrap(session).createTemporaryMasterRealmAdminService(clientId, clientSecret /*, adminExpiration*/);
-        };
-
-        runAdminTask(clientId, existingSession, task);
-    }
-
-    private void runAdminTask(String adminUserName, KeycloakSession existingSession, KeycloakSessionTask task) {
-        try {
-            if (existingSession == null) {
-                KeycloakSessionFactory sessionFactory = KeycloakApplication.getSessionFactory();
-                KeycloakModelUtils.runJobInTransaction(sessionFactory, task);
-            } else {
-                task.run(existingSession);
-            }
-        } catch (Throwable t) {
-            ServicesLogger.LOGGER.addUserFailed(t, adminUserName, Config.getAdminRealm());
-        }
-    }
-
-    private String getEnvOrProp(String envKey, String propKey) {
-        String value = System.getenv(envKey);
-        return value != null ? value : System.getProperty(propKey);
+    public boolean createTemporaryMasterRealmAdminService(String clientId, String clientSecret, /*Integer adminExpiration,*/ KeycloakSession session) {
+        return new ApplianceBootstrap(session).createTemporaryMasterRealmAdminService(clientId, clientSecret /*, adminExpiration*/);
     }
 
 }

@@ -74,7 +74,7 @@ public class OrganizationMemberAuthenticationTest extends AbstractOrganizationTe
     }
 
     @Test
-    public void testAuthenticateUnmanagedMemberWehnProviderDisabled() throws IOException {
+    public void testAuthenticateUnmanagedMemberWhenProviderDisabled() throws IOException {
         OrganizationResource organization = testRealm().organizations().get(createOrganization().getId());
         UserRepresentation member = addMember(organization, "contractor@contractor.org");
 
@@ -86,7 +86,7 @@ public class OrganizationMemberAuthenticationTest extends AbstractOrganizationTe
 
         // disable the organization provider
         try (RealmAttributeUpdater rau = new RealmAttributeUpdater(testRealm())
-                .setOrganizationEnabled(Boolean.FALSE)
+                .setOrganizationsEnabled(Boolean.FALSE)
                 .update()) {
 
             // access the page again, now it should be present username and password fields
