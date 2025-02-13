@@ -20,7 +20,7 @@ package org.keycloak.testsuite.pages;
 import org.jboss.arquillian.test.api.ArquillianResource;
 import org.junit.Assert;
 import org.keycloak.testsuite.util.DroneUtils;
-import org.keycloak.testsuite.util.OAuthClient;
+import org.keycloak.testsuite.util.oauth.OAuthClient;
 import org.keycloak.testsuite.util.UIUtils;
 import org.keycloak.testsuite.util.WaitUtils;
 import org.openqa.selenium.By;
@@ -183,6 +183,22 @@ public class LoginPage extends LanguageComboboxAwarePage {
                     return null;
                 }
             }
+        }
+    }
+
+    public String getUsernameInputError() {
+        try {
+            return getTextFromElement(userNameInputError);
+        } catch (NoSuchElementException e) {
+            return null;
+        }
+    }
+
+    public String getPasswordInputError() {
+        try {
+            return getTextFromElement(passwordInputError);
+        } catch (NoSuchElementException e) {
+            return null;
         }
     }
 
