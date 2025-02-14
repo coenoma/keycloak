@@ -28,12 +28,14 @@ import jakarta.ws.rs.core.Response;
 import org.keycloak.OAuth2Constants;
 import org.keycloak.OAuthErrorException;
 import org.keycloak.common.ClientConnection;
+import org.keycloak.common.Profile;
 import org.keycloak.common.constants.ServiceAccountConstants;
 import org.keycloak.events.Details;
 import org.keycloak.events.Errors;
 import org.keycloak.events.EventBuilder;
 import org.keycloak.models.ClientModel;
 import org.keycloak.models.ClientSessionContext;
+import org.keycloak.models.Constants;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
@@ -41,6 +43,7 @@ import org.keycloak.models.UserSessionModel;
 import org.keycloak.protocol.oidc.OIDCAdvancedConfigWrapper;
 import org.keycloak.protocol.oidc.TokenExchangeContext;
 import org.keycloak.protocol.oidc.TokenManager;
+import org.keycloak.rar.AuthorizationRequestContext;
 import org.keycloak.representations.AccessToken;
 import org.keycloak.representations.AccessTokenResponse;
 import org.keycloak.services.CorsErrorResponseException;
@@ -48,6 +51,7 @@ import org.keycloak.services.cors.Cors;
 import org.keycloak.services.managers.AuthenticationManager;
 import org.keycloak.services.managers.AuthenticationSessionManager;
 import org.keycloak.services.managers.UserSessionManager;
+import org.keycloak.services.util.AuthorizationContextUtil;
 import org.keycloak.sessions.AuthenticationSessionModel;
 import org.keycloak.sessions.RootAuthenticationSessionModel;
 import org.keycloak.util.TokenUtil;
@@ -121,19 +125,58 @@ public class StandardTokenExchangeProvider extends AbstractTokenExchangeProvider
         return exchangeClientToClient(tokenUser, tokenSession, token, true);
     }
 
+    protected void validateAudience(AccessToken token, boolean disallowOnHolderOfTokenMismatch, List<ClientModel> targetAudienceClients) {
+        ClientModel tokenHolder = token == null ? null : realm.getClientByClientId(token.getIssuedFor());
+        //reject if the requester-client is not in the audience of the subject token
+        if (!client.equals(tokenHolder)) {
+            forbiddenIfClientIsNotWithinTokenAudience(token, null);
+        }
+        for (ClientModel targetClient : targetAudienceClients) {
+            boolean isClientTheAudience = targetClient.equals(client);
+            if (isClientTheAudience) {
+                if (client.isPublicClient()) {
+                    // public clients can only exchange on to themselves if they are the token holder
+                    forbiddenIfClientIsNotTokenHolder(disallowOnHolderOfTokenMismatch, tokenHolder);
+                } else if (!client.equals(tokenHolder)) {
+                    // confidential clients can only exchange to themselves if they are within the token audience
+                    forbiddenIfClientIsNotWithinTokenAudience(token, tokenHolder);
+                }
+            } else {
+                if (client.isPublicClient()) {
+                    // public clients can not exchange tokens from other client
+                    forbiddenIfClientIsNotTokenHolder(disallowOnHolderOfTokenMismatch, tokenHolder);
+                }
+            }
+        }
+    }
 
     // For now, include "scope" parameter as is
     @Override
     protected String getRequestedScope(AccessToken token, List<ClientModel> targetAudienceClients) {
-        return params.getScope();
-    }
+        String scope = formParams.getFirst(OAuth2Constants.SCOPE);
 
+        boolean validScopes;
+        if (Profile.isFeatureEnabled(Profile.Feature.DYNAMIC_SCOPES)) {
+            AuthorizationRequestContext authorizationRequestContext = AuthorizationContextUtil.getAuthorizationRequestContextFromScopes(session, scope);
+            validScopes = TokenManager.isValidScope(session, scope, authorizationRequestContext, client, null);
+        } else {
+            validScopes = TokenManager.isValidScope(session, scope, client, null);
+        }
+
+        if (!validScopes) {
+            String errorMessage = "Invalid scopes: " + scope;
+            event.detail(Details.REASON, errorMessage);
+            event.error(Errors.INVALID_REQUEST);
+            throw new CorsErrorResponseException(cors, OAuthErrorException.INVALID_SCOPE, errorMessage, Response.Status.BAD_REQUEST);
+        }
+
+        return scope;
+    }
 
     protected void setClientToContext(List<ClientModel> targetAudienceClients) {
         // The client requesting exchange is set in the context
         session.getContext().setClient(client);
     }
-
 
     protected Response exchangeClientToOIDCClient(UserModel targetUser, UserSessionModel targetUserSession, String requestedTokenType,
                                                   List<ClientModel> targetAudienceClients, String scope) {
@@ -151,6 +194,10 @@ public class StandardTokenExchangeProvider extends AbstractTokenExchangeProvider
         ClientSessionContext clientSessionCtx = TokenManager.attachAuthenticationSession(this.session, targetUserSession, authSession);
 
         updateUserSessionFromClientAuth(targetUserSession);
+
+        if (params.getAudience() != null && !targetAudienceClients.isEmpty()) {
+            clientSessionCtx.setAttribute(Constants.REQUESTED_AUDIENCE_CLIENT_IDS, targetAudienceClients.stream().map(ClientModel::getId).toArray(String[]::new));
+        }
 
         TokenManager.AccessTokenResponseBuilder responseBuilder = tokenManager.responseBuilder(realm, client, event, this.session, targetUserSession, clientSessionCtx)
                 .generateAccessToken();

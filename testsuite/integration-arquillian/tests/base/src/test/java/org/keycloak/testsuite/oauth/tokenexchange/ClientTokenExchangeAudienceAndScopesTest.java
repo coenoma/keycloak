@@ -21,7 +21,7 @@ package org.keycloak.testsuite.oauth.tokenexchange;
 
 import java.util.List;
 
-import org.apache.http.HttpStatus;
+import jakarta.ws.rs.core.Response;
 import org.hamcrest.MatcherAssert;
 import org.junit.Assert;
 import org.junit.FixMethodOrder;
@@ -35,9 +35,10 @@ import org.keycloak.representations.idm.RealmRepresentation;
 import org.keycloak.testsuite.AbstractKeycloakTest;
 import org.keycloak.testsuite.AssertEvents;
 import org.keycloak.testsuite.arquillian.annotation.EnableFeature;
-import org.keycloak.testsuite.util.OAuthClient;
+import org.keycloak.testsuite.util.oauth.AccessTokenResponse;
 
 import static org.hamcrest.Matchers.containsInAnyOrder;
+import static org.junit.Assert.assertEquals;
 import static org.keycloak.testsuite.admin.AbstractAdminTest.loadJson;
 import static org.keycloak.testsuite.auth.page.AuthRealm.TEST;
 
@@ -47,7 +48,6 @@ import static org.keycloak.testsuite.auth.page.AuthRealm.TEST;
  * @author <a href="mailto:mposolda@redhat.com">Marek Posolda</a>
  */
 @EnableFeature(value = Profile.Feature.TOKEN_EXCHANGE_STANDARD_V2, skipRestart = true)
-@EnableFeature(value = Profile.Feature.ADMIN_FINE_GRAINED_AUTHZ, skipRestart = true) // TODO: Remove as we may not need to use FGAP for token exchange
 @FixMethodOrder(MethodSorters.NAME_ASCENDING)
 public class ClientTokenExchangeAudienceAndScopesTest extends AbstractKeycloakTest {
 
@@ -60,56 +60,92 @@ public class ClientTokenExchangeAudienceAndScopesTest extends AbstractKeycloakTe
     }
 
     @Test
-    public void test01_scopeParamIncludedWithoutAudience() throws Exception {
-        String accessToken = resourceOwnerLogin();
+    public void testOptionalScopeParamRequestedWithoutAudience() throws Exception {
+        String accessToken = resourceOwnerLogin("john", "password", List.of("target-client1"), List.of("default-scope1"));;
         oauth.scope("optional-scope2");
-        OAuthClient.AccessTokenResponse response = oauth.doTokenExchange(TEST, accessToken, (String) null, "requester-client", "secret", null);
+        AccessTokenResponse response = oauth.doTokenExchange(accessToken, (String) null, "requester-client", "secret", null);
         assertAudiencesAndScopes(response, List.of("target-client1", "target-client2"), List.of("default-scope1", "optional-scope2"));
     }
 
     @Test
-    public void test02_scopeParamIncludedAudienceIncluded() throws Exception {
-        String accessToken = resourceOwnerLogin();
-        oauth.scope("optional-scope2");
-        OAuthClient.AccessTokenResponse response = oauth.doTokenExchange(TEST, accessToken, List.of("target-client1"), "requester-client", "secret", null);
-        assertAudiencesAndScopes(response, List.of("target-client1"), List.of("default-scope1", "optional-scope2"));
+    public void testAudienceRequested() throws Exception {
+        String accessToken = resourceOwnerLogin("john", "password", List.of("target-client1"), List.of("default-scope1"));;
+        AccessTokenResponse response = oauth.doTokenExchange(accessToken, List.of("target-client1"), "requester-client", "secret", null);
+        assertAudiencesAndScopes(response, List.of("target-client1"), List.of("default-scope1"));
     }
-
 
     @Test
-    public void test03_scopeParamIncludedAudienceIncluded_unavailableAudience() throws Exception {
-        String accessToken = resourceOwnerLogin();
-        oauth.scope("optional-scope2");
-
+    public void testUnavailableAudienceRequested() throws Exception {
+        String accessToken = resourceOwnerLogin("john", "password", List.of("target-client1"), List.of("default-scope1"));;
         // The "target-client3" is valid client, but unavailable to the user. Request allowed, but "target-client3" audience will not be available
-        OAuthClient.AccessTokenResponse response = oauth.doTokenExchange(TEST, accessToken, List.of("target-client1", "target-client3"), "requester-client", "secret", null);
-        assertAudiencesAndScopes(response, List.of("target-client1"), List.of("default-scope1", "optional-scope2"));
+        AccessTokenResponse response = oauth.doTokenExchange(accessToken, List.of("target-client1", "target-client3"), "requester-client", "secret", null);
+        assertAudiencesAndScopes(response, List.of("target-client1"), List.of("default-scope1"));
     }
 
+    @Test
+    public void testScopeNotAllowed() throws Exception {
+        String accessToken = resourceOwnerLogin("john", "password", List.of("target-client1"), List.of("default-scope1"));
 
-    private String resourceOwnerLogin() throws Exception {
+        //scope not allowed
+        oauth.scope("optional-scope3");
+        AccessTokenResponse response = oauth.doTokenExchange(accessToken, List.of("target-client1", "target-client3"), "requester-client", "secret", null);
+        assertEquals(Response.Status.BAD_REQUEST.getStatusCode(), response.getStatusCode());
+
+        //scope that doesn't exist
+        oauth.scope("bad-scope");
+        response = oauth.doTokenExchange(accessToken, List.of("target-client1", "target-client3"), "requester-client", "secret", null);
+        assertEquals(Response.Status.BAD_REQUEST.getStatusCode(), response.getStatusCode());
+    }
+
+    @Test
+    public void testScopeFilter() throws Exception {
+        String accessToken = resourceOwnerLogin("john", "password", List.of("target-client1"), List.of("default-scope1"));
+        AccessTokenResponse response = oauth.doTokenExchange(accessToken, List.of( "target-client2"), "requester-client", "secret", null);
+        assertAudiencesAndScopes(response, List.of(), List.of());
+
+        oauth.scope("optional-scope2");
+        response = oauth.doTokenExchange(accessToken, List.of( "target-client2"), "requester-client", "secret", null);
+        assertAudiencesAndScopes(response, List.of("target-client2"), List.of( "optional-scope2"));
+
+        oauth.scope("optional-scope2");
+        response = oauth.doTokenExchange(accessToken, List.of("target-client1", "target-client2"), "requester-client", "secret", null);
+        assertAudiencesAndScopes(response, List.of("target-client1", "target-client2"), List.of("default-scope1", "optional-scope2"));
+
+        //just check that the exchanged token contains the optional-scope2 mapped by the realm role
+        accessToken = resourceOwnerLogin("mike", "password", List.of("target-client1"), List.of("default-scope1"));
+        oauth.scope("optional-scope2");
+        response = oauth.doTokenExchange(accessToken, List.of(), "requester-client", "secret", null);
+        assertAudiencesAndScopes(response, List.of("target-client1"), List.of("default-scope1", "optional-scope2"));
+
+        accessToken = resourceOwnerLogin("mike", "password", List.of("target-client1"), List.of("default-scope1"));
+        oauth.scope("optional-scope2");
+        response = oauth.doTokenExchange(accessToken, List.of("target-client1"), "requester-client", "secret", null);
+        assertAudiencesAndScopes(response,  List.of("target-client1"), List.of("default-scope1", "optional-scope2"));
+    }
+
+    private String resourceOwnerLogin(String username, String password, List<String> audience, List<String> scope) throws Exception {
         oauth.realm(TEST);
         oauth.clientId("requester-client");
         oauth.scope(null);
         oauth.openid(false);
-        OAuthClient.AccessTokenResponse response = oauth.doGrantAccessTokenRequest("secret", "john", "password");
+        AccessTokenResponse response = oauth.doGrantAccessTokenRequest("secret", username, password);
         TokenVerifier<AccessToken> accessTokenVerifier = TokenVerifier.create(response.getAccessToken(), AccessToken.class);
         AccessToken token = accessTokenVerifier.parse().getToken();
-        assertAudiences(token, List.of("target-client1"));
-        assertScopes(token, List.of("default-scope1"));
+        assertAudiences(token, audience);
+        assertScopes(token, scope);
         return response.getAccessToken();
     }
 
     private void assertAudiences(AccessToken token, List<String> expectedAudiences) {
-        MatcherAssert.assertThat("Incompatible audiences", List.of(token.getAudience()), containsInAnyOrder(expectedAudiences.toArray()));
+        MatcherAssert.assertThat("Incompatible audiences", token.getAudience() == null ? List.of() : List.of(token.getAudience()), containsInAnyOrder(expectedAudiences.toArray()));
         MatcherAssert.assertThat("Incompatible resource access", token.getResourceAccess().keySet(), containsInAnyOrder(expectedAudiences.toArray()));
     }
 
     private void assertScopes(AccessToken token, List<String> expectedScopes) {
-        MatcherAssert.assertThat("Incompatible scopes", List.of(token.getScope().split(" ")), containsInAnyOrder(expectedScopes.toArray()));
+        MatcherAssert.assertThat("Incompatible scopes", token.getScope().isEmpty() ? List.of() : List.of(token.getScope().split(" ")), containsInAnyOrder(expectedScopes.toArray()));
     }
 
-    private void assertAudiencesAndScopes(OAuthClient.AccessTokenResponse tokenExchangeResponse, List<String> expectedAudiences, List<String> expectedScopes) throws Exception {
+    private void assertAudiencesAndScopes(AccessTokenResponse tokenExchangeResponse, List<String> expectedAudiences, List<String> expectedScopes) throws Exception {
         TokenVerifier<AccessToken> accessTokenVerifier = TokenVerifier.create(tokenExchangeResponse.getAccessToken(), AccessToken.class);
         AccessToken token = accessTokenVerifier.parse().getToken();
         if (expectedAudiences == null) {
